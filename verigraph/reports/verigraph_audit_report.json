@@ -1,0 +1,206 @@
+{
+  "audit_metadata": {
+    "generated_at": "2026-08-25T02:55:14.926662Z",
+    "engine_version": "verigraph-python-reference (real IRLS fit, no hardcoded coefficients)",
+    "dataset_path": "datasets/swe_bench_verified_fixtures.json",
+    "dataset_sha256": "5c990e033fd49e46d1d2d3c181112db5c4f9e5d5fc933cc0e484986e9001de95",
+    "symptom_window_w": 5,
+    "alarm_probability_threshold": 0.58,
+    "ridge_penalty_l2": 1.0,
+    "notes": "All numbers below are computed by running python/verigraph.py against the bundled dataset -- nothing here is hand-entered. Sample size is small (25 independent traces, 224 pseudo-replicated person-period rows), so treat coefficient magnitudes and near-perfect AUROC as evidence the algorithm separates this particular synthetic fixture set cleanly, not as a validated real-world detection rate. See README 'Honest Limitations'."
+  },
+  "statistical_hazard_model": {
+    "sample_size_person_period_steps": 224,
+    "sample_size_independent_traces": 25,
+    "log_likelihood_fitted": -1.774,
+    "aic": 21.55,
+    "mcfadden_pseudo_r_squared": 0.9692,
+    "coefficients_summary": {
+      "names": [
+        "intercept",
+        "stock",
+        "flow",
+        "stock_x_flow",
+        "delta_stock_existing",
+        "new_node_stock",
+        "step_frac",
+        "nodes_seen",
+        "task_difficulty"
+      ],
+      "beta": [
+        -16.5984,
+        0.2532,
+        3.5931,
+        -1.4022,
+        0.9481,
+        0.0,
+        8.6965,
+        -2.5056,
+        -0.7627
+      ],
+      "standard_errors": [
+        0.9323,
+        0.8718,
+        0.6633,
+        0.6641,
+        0.8797,
+        1.0,
+        0.8483,
+        0.8173,
+        0.8178
+      ],
+      "z_scores": [
+        -17.8044,
+        0.2905,
+        5.4172,
+        -2.1115,
+        1.0778,
+        0.0,
+        10.2516,
+        -3.0657,
+        -0.9326
+      ],
+      "p_values": [
+        0.0,
+        0.77146,
+        0.0,
+        0.03473,
+        0.28113,
+        1.0,
+        0.0,
+        0.00217,
+        0.35103
+      ],
+      "odds_ratios": [
+        0.0,
+        1.2882,
+        36.3471,
+        0.2461,
+        2.5808,
+        1.0,
+        5982.0335,
+        0.0816,
+        0.4664
+      ],
+      "confidence_intervals_95_on_beta": [
+        [
+          -18.4257,
+          -14.7712
+        ],
+        [
+          -1.4555,
+          1.962
+        ],
+        [
+          2.2931,
+          4.8931
+        ],
+        [
+          -2.7037,
+          -0.1006
+        ],
+        [
+          -0.776,
+          2.6722
+        ],
+        [
+          -1.96,
+          1.96
+        ],
+        [
+          7.0338,
+          10.3592
+        ],
+        [
+          -4.1075,
+          -0.9037
+        ],
+        [
+          -2.3656,
+          0.8402
+        ]
+      ]
+    }
+  },
+  "ablation_matrix_benchmarks": [
+    {
+      "model_name": "Stock-Only",
+      "features": [
+        "stock"
+      ],
+      "auroc": 0.6806,
+      "f1_score_at_alarm_threshold": 0.0,
+      "lead_time_gain_steps": 0,
+      "pseudo_r_squared": 0.1375,
+      "aic": 103.42
+    },
+    {
+      "model_name": "Flow-Only",
+      "features": [
+        "flow"
+      ],
+      "auroc": 1.0,
+      "f1_score_at_alarm_threshold": 1.0,
+      "lead_time_gain_steps": 0,
+      "pseudo_r_squared": 0.8045,
+      "aic": 26.54
+    },
+    {
+      "model_name": "Stock+Flow (Additive)",
+      "features": [
+        "stock",
+        "flow"
+      ],
+      "auroc": 1.0,
+      "f1_score_at_alarm_threshold": 1.0,
+      "lead_time_gain_steps": 0,
+      "pseudo_r_squared": 0.8061,
+      "aic": 28.36
+    },
+    {
+      "model_name": "Full (Interaction + Controls)",
+      "features": [
+        "stock",
+        "flow",
+        "stock_x_flow",
+        "delta_stock_existing",
+        "new_node_stock",
+        "step_frac",
+        "nodes_seen",
+        "task_difficulty"
+      ],
+      "auroc": 1.0,
+      "f1_score_at_alarm_threshold": 1.0,
+      "lead_time_gain_steps": 0,
+      "pseudo_r_squared": 0.9692,
+      "aic": 21.55
+    }
+  ],
+  "inspired_by_external_baselines": {
+    "disclosure": "Neither row below is the published method. TRACE (arXiv:2606.07054) is an LLM-in-the-loop agent evaluated on SHADE-Arena (a different benchmark); TrajAD (arXiv:2602.06443) is a fine-tuned specialized verifier with no public checkpoint. Both are unavailable to run as-published in this environment. What's below are rule-based, non-LLM approximations of each paper's structural idea (see trace_inspired_score() / trajad_inspired_localize() docstrings in python/verigraph.py for exactly what was substituted), scored for real on our own dataset with our own AUROC/F1 code. Not comparable to the papers' reported numbers.",
+    "trace_inspired": {
+      "model_name": "TRACE-inspired heuristic (arXiv:2606.07054, rule-based reimplementation)",
+      "auroc": 1.0,
+      "f1_score": 0.8571,
+      "verdict_rule": "malicious iff max finding severity >= 4 (TRACE paper's own stated Judge rule)"
+    },
+    "trajad_inspired": {
+      "model_name": "TrajAD-inspired naive first-failure detector (arXiv:2602.06443 task formalization)",
+      "auroc": 1.0,
+      "f1_score": 1.0,
+      "verdict_rule": "Anomaly iff at least one resolution.failed/resolution.escalated event occurs anywhere in the trace",
+      "localization_note": "first_error_step is reported per-trace but NOT scored -- dataset has no step-level ground truth to validate against."
+    }
+  },
+  "causal_experiment_findings": {
+    "central_node": "hub",
+    "peripheral_node": "isolated_peripheral",
+    "central_centrality": 5.95,
+    "peripheral_centrality": 1.0,
+    "central_failure_rate": 0.95,
+    "peripheral_failure_rate": 0.275,
+    "chi_square": 189.135,
+    "p_value_outcome_difference": 4.910813114959623e-43,
+    "centrality_mechanism_supported": true
+  }
+}

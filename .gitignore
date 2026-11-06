@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+coverage/
+.vite/
+stryker-tmp/
+.stryker-tmp/
+reports/mutation/
+*.log
+!ky-mutation-testing-project/*baseline.log
+!ky-mutation-testing-project/stryker_first_completed_run.log
+.env
+.env.local
+.DS_Store
+__pycache__/
+*.pyc
+# TLC model-checker scratch output
+**/states/
+*_TTrace_*

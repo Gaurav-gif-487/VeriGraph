@@ -1,0 +1,37 @@
+{
+  "name": "verigraph",
+  "version": "1.0.0",
+  "description": "Runtime Verification Debt & Reliability Layer for AI Agents",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --port=3000 --host=0.0.0.0",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "tsx tests/verigraph.test.ts",
+    "benchmark": "tsx cli/verigraph.ts benchmark",
+    "analyze": "tsx cli/verigraph.ts analyze",
+    "causal-test": "tsx cli/verigraph.ts causal-test",
+    "mcp": "tsx cli/verigraph-mcp.ts",
+    "causal-test-v2": "tsx cli/verigraph.ts causal-test-v2",
+    "causal-test-v3": "tsx cli/verigraph.ts causal-test-v3",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.5",
+    "@vitejs/plugin-react": "^6.1.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "recharts": "^3.10.1",
+    "tsx": "^4.21.0",
+    "typescript": "~5.8.2",
+    "vite": "^8.2.2"
+  }
+}

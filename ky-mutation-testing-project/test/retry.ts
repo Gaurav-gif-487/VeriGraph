@@ -1,0 +1,2857 @@
+import process from 'node:process';
+import {setTimeout as delay} from 'node:timers/promises';
+import test, {type ExecutionContext} from 'ava';
+import ky, {
+	NetworkError,
+	TimeoutError,
+	isKyError,
+	isNetworkError,
+} from '../source/index.js';
+import {createHttpTestServer} from './helpers/create-http-test-server.js';
+import {parseRawBody} from './helpers/parse-body.js';
+import {withPerformance} from './helpers/with-performance.js';
+
+const fixture = 'fixture';
+const defaultRetryCount = 2;
+const retryAfterOn500 = 2;
+const retryAfterOn413 = 2;
+const retryAfterTimestampText = '1704067200';
+const retryAfterTimestampScheduledDelay = 2_147_483_647;
+const httpDateDayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const httpDateLongDayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const httpDateMonths = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+const formatHttpTime = (date: Date) => [
+	date.getUTCHours(),
+	date.getUTCMinutes(),
+	date.getUTCSeconds(),
+].map(value => value.toString().padStart(2, '0')).join(':');
+
+const formatAsctimeDate = (date: Date) => {
+	const day = date.getUTCDate().toString().padStart(2, ' ');
+
+	return `${httpDateDayNames[date.getUTCDay()]} ${httpDateMonths[date.getUTCMonth()]} ${day} ${formatHttpTime(date)} ${date.getUTCFullYear()}`;
+};
+
+const formatRfc850Date = (date: Date) => {
+	const day = date.getUTCDate().toString().padStart(2, '0');
+	const year = (date.getUTCFullYear() % 100).toString().padStart(2, '0');
+
+	return `${httpDateLongDayNames[date.getUTCDay()]}, ${day}-${httpDateMonths[date.getUTCMonth()]}-${year} ${formatHttpTime(date)} GMT`;
+};
+
+const withCapturedTimeouts = async (body: (scheduledDelays: number[]) => Promise<void>) => {
+	const originalSetTimeout = globalThis.setTimeout;
+	const scheduledDelays: number[] = [];
+
+	globalThis.setTimeout = ((handler, delayMs, ...arguments_) => {
+		if (typeof delayMs === 'number') {
+			scheduledDelays.push(delayMs);
+		}
+
+		const testDelayMs = typeof delayMs === 'number' && delayMs > 1_000_000 ? 0 : delayMs;
+		return originalSetTimeout(handler, testDelayMs, ...arguments_);
+	}) as typeof globalThis.setTimeout;
+
+	try {
+		await body(scheduledDelays);
+	} finally {
+		globalThis.setTimeout = originalSetTimeout;
+	}
+};
+
+const createSingleRetryHeaderServer = async (t: ExecutionContext, headers: Record<string, string | number>) => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 2) {
+			response.end(fixture);
+			return;
+		}
+
+		response.writeHead(429, headers);
+		response.end('');
+	});
+
+	return {
+		server,
+		get requestCount() {
+			return requestCount;
+		},
+	};
+};
+
+test('network error', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.status(99_999).end();
+		}
+	});
+
+	t.is(await ky(server.url).text(), fixture);
+	t.is(requestCount, defaultRetryCount + 1);
+});
+
+test('status code 500', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	t.is(await ky(server.url).text(), fixture);
+	t.is(requestCount, defaultRetryCount + 1);
+});
+
+test('only on defined status codes', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(400);
+		}
+	});
+
+	await t.throwsAsync(ky(server.url).text(), {message: /Bad Request/});
+	t.is(requestCount, 1);
+});
+
+test('not on POST', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.post('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await t.throwsAsync(ky.post(server.url).text(), {
+		message: /Internal Server Error/,
+	});
+	t.is(requestCount, 1);
+});
+
+test('QUERY retries by default', async t => {
+	let requestCount = 0;
+	const receivedBodies: unknown[] = [];
+	const receivedMethods: string[] = [];
+
+	const server = await createHttpTestServer(t);
+	server.all('/', (request, response) => {
+		requestCount++;
+		receivedMethods.push(request.method);
+		receivedBodies.push(request.body);
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.json(request.body);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	const json = {
+		foo: true,
+	};
+
+	const result = await ky.query(server.url, {
+		json,
+		retry: {
+			delay: () => 0,
+		},
+	}).json();
+
+	t.deepEqual(result, json);
+	t.is(requestCount, defaultRetryCount + 1);
+	t.deepEqual(receivedMethods, ['QUERY', 'QUERY', 'QUERY']);
+	t.deepEqual(receivedBodies, [json, json, json]);
+});
+
+test('respect Retry-After: 0 and retry immediately', async t => {
+	const retryCount = 4;
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.writeHead(413, {
+				'Retry-After': 0,
+			});
+
+			response.end('');
+		}
+	});
+
+	await withPerformance({
+		t,
+		expectedDuration: 4 + 4 + 4 + 4,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: retryCount,
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+});
+
+test.serial('Retry-After number is treated as delay seconds, not timestamp', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('invalid Retry-After number 0x10 falls back to retry delay', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': '0x10',
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			timeout: false,
+			retry: {
+				limit: 1,
+				delay: () => 10,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(10));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('X-RateLimit-Retry-After number is treated as delay seconds, not timestamp', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'X-RateLimit-Retry-After': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('Retry-After takes precedence over RateLimit-Reset', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': '1',
+		'RateLimit-Reset': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(1000));
+		t.false(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('invalid Retry-After does not fall back to RateLimit-Reset', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': '1e3',
+		'RateLimit-Reset': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 23,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(23));
+		t.false(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('empty Retry-After does not fall back to RateLimit-Reset', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': '',
+		'RateLimit-Reset': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 31,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(31));
+		t.false(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('non-standard Retry-After date falls back to retry delay', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': 'Sun Nov 06 1994 08:49:37 GMT',
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 29,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(29));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+for (const [dateFormat, formatDate] of [
+	['RFC 850', formatRfc850Date],
+	['asctime', formatAsctimeDate],
+] as const) {
+	test.serial(`Retry-After supports obsolete HTTP-date format: ${dateFormat}`, async t => {
+		const retryAfterDate = formatDate(new Date(Date.now() + 2_000_000));
+		const retryServer = await createSingleRetryHeaderServer(t, {
+			'Retry-After': retryAfterDate,
+		});
+
+		await withCapturedTimeouts(async scheduledDelays => {
+			t.is(await ky(retryServer.server.url, {
+				retry: {
+					limit: 1,
+					delay: () => 13,
+				},
+			}).text(), fixture);
+
+			t.true(scheduledDelays.some(delay => delay > 1_000_000));
+			t.false(scheduledDelays.includes(13));
+		});
+
+		t.is(retryServer.requestCount, 2);
+	});
+}
+
+test.serial('Retry-After asctime HTTP-date is parsed as GMT', async t => {
+	const retryAfterDate = formatAsctimeDate(new Date(Date.now() + 2_000_000));
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': retryAfterDate,
+	});
+
+	const timeZone = process.env.TZ;
+	try {
+		process.env.TZ = 'Pacific/Kiritimati';
+		await withCapturedTimeouts(async scheduledDelays => {
+			t.is(await ky(retryServer.server.url, {
+				retry: {
+					limit: 1,
+					delay: () => 13,
+				},
+			}).text(), fixture);
+
+			t.true(scheduledDelays.some(delay => delay > 1_000_000));
+			t.false(scheduledDelays.includes(13));
+		});
+	} finally {
+		if (timeZone === undefined) {
+			delete process.env.TZ;
+		} else {
+			process.env.TZ = timeZone;
+		}
+	}
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('Retry-After HTTP-date supports a leap second', async t => {
+	const now = Date.now();
+	const retryAfterInstant = new Date(now + 2_000_000);
+	retryAfterInstant.setUTCSeconds(59, 0);
+	const day = retryAfterInstant.getUTCDate().toString().padStart(2, '0');
+	const hours = retryAfterInstant.getUTCHours().toString().padStart(2, '0');
+	const minutes = retryAfterInstant.getUTCMinutes().toString().padStart(2, '0');
+	const dayName = httpDateDayNames[retryAfterInstant.getUTCDay()];
+	const month = httpDateMonths[retryAfterInstant.getUTCMonth()];
+	const retryAfterDate = `${dayName}, ${day} ${month} ${retryAfterInstant.getUTCFullYear()} ${hours}:${minutes}:60 GMT`;
+	const expectedDelay = retryAfterInstant.getTime() + 1000 - now;
+
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': retryAfterDate,
+	});
+
+	const dateNow = Date.now;
+	try {
+		Date.now = () => now;
+		await withCapturedTimeouts(async scheduledDelays => {
+			t.is(await ky(retryServer.server.url, {
+				retry: {
+					limit: 1,
+					delay: () => 13,
+				},
+			}).text(), fixture);
+
+			t.true(scheduledDelays.includes(expectedDelay));
+			t.false(scheduledDelays.includes(expectedDelay - 1000));
+			t.false(scheduledDelays.includes(13));
+		});
+	} finally {
+		Date.now = dateNow;
+	}
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('Retry-After RFC 850 HTTP-date applies the two-digit year rule', async t => {
+	const retryAfterDate = new Date(Date.now() + 2000);
+	retryAfterDate.setUTCFullYear(retryAfterDate.getUTCFullYear() + 49);
+
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': formatRfc850Date(retryAfterDate),
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 13,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.some(delay => delay > 1_000_000));
+		t.false(scheduledDelays.includes(13));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('Retry-After RFC 850 HTTP-date more than 50 years in the future is interpreted as past', async t => {
+	const retryAfterDate = new Date(Date.now() + 2000);
+	retryAfterDate.setUTCFullYear(retryAfterDate.getUTCFullYear() + 51);
+
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': formatRfc850Date(retryAfterDate),
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 13,
+				maxRetryAfter: 1,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(0));
+		t.false(scheduledDelays.includes(1));
+		t.false(scheduledDelays.includes(13));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('invalid Retry-After HTTP-date components fall back to retry delay', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'Retry-After': 'Sun, 32 Dec 2030 25:99:99 GMT',
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 17,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(17));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test('RateLimit-Reset delay seconds are respected like Retry-After', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			const header = (requestCount < 2) ? 'RateLimit-Reset' : 'Retry-After';
+			response.writeHead(429, {
+				[header]: 1,
+			});
+
+			response.end('');
+		}
+	});
+
+	await withPerformance({
+		t,
+		expectedDuration: 1000 + 1000,
+		async test() {
+			t.is(await ky(server.url).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 3);
+});
+
+test.serial('RateLimit-Reset with time since epoch', async t => {
+	const now = Date.UTC(2026, 0, 1);
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end(fixture);
+		} else {
+			const oneSecondByDelta = 1;
+			const threeSecondsByEpoch = (now / 1000) + 3;
+			response.writeHead(429, {
+				'RateLimit-Reset': (requestCount < 2) ? oneSecondByDelta : threeSecondsByEpoch,
+			});
+
+			response.end('');
+		}
+	});
+
+	const dateNow = Date.now;
+	try {
+		Date.now = () => now;
+		await withCapturedTimeouts(async scheduledDelays => {
+			t.is(await ky(server.url).text(), fixture);
+
+			t.true(scheduledDelays.includes(1000));
+			t.true(scheduledDelays.includes(3000));
+			t.true(scheduledDelays.indexOf(1000) < scheduledDelays.indexOf(3000));
+			t.false(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+		});
+	} finally {
+		Date.now = dateNow;
+	}
+
+	t.is(requestCount, 3);
+});
+
+test.serial('empty RateLimit-Reset falls back to retry delay', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'RateLimit-Reset': '',
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 37,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(37));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+test.serial('empty RateLimit-Reset does not fall back to lower-priority reset alias', async t => {
+	const retryServer = await createSingleRetryHeaderServer(t, {
+		'RateLimit-Reset': '',
+		'X-RateLimit-Reset': retryAfterTimestampText,
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(retryServer.server.url, {
+			retry: {
+				limit: 1,
+				delay: () => 41,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(41));
+		t.false(scheduledDelays.includes(retryAfterTimestampScheduledDelay));
+	});
+
+	t.is(retryServer.requestCount, 2);
+});
+
+for (const rateLimitResetHeader of ['X-RateLimit-Reset', 'X-Rate-Limit-Reset']) {
+	test.serial(`${rateLimitResetHeader} supports time since epoch`, async t => {
+		const now = Date.UTC(2026, 0, 1);
+		const retryServer = await createSingleRetryHeaderServer(t, {
+			[rateLimitResetHeader]: (now / 1000) + 2,
+		});
+
+		const dateNow = Date.now;
+		try {
+			Date.now = () => now;
+			await withCapturedTimeouts(async scheduledDelays => {
+				t.is(await ky(retryServer.server.url, {
+					retry: {
+						limit: 1,
+						delay: () => 7,
+						maxRetryAfter: 3500,
+					},
+				}).text(), fixture);
+
+				t.true(scheduledDelays.includes(2000));
+				t.false(scheduledDelays.includes(3500));
+				t.false(scheduledDelays.includes(7));
+			});
+		} finally {
+			Date.now = dateNow;
+		}
+
+		t.is(retryServer.requestCount, 2);
+	});
+}
+
+test('respect 413 Retry-After', async t => {
+	const startTime = Date.now();
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end((Date.now() - startTime).toString());
+		} else {
+			response.writeHead(413, {
+				'Retry-After': retryAfterOn413,
+			});
+			response.end('');
+		}
+	});
+
+	const timeElapsedInMs = Number(await ky(server.url).text());
+	t.true(timeElapsedInMs >= retryAfterOn413 * 1000);
+	t.is(requestCount, retryAfterOn413 + 1);
+});
+
+test('respect 413 Retry-After with HTTP date', async t => {
+	const startTime = Date.now();
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t, {bodyParser: false});
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === defaultRetryCount + 1) {
+			response.end((Date.now() - startTime).toString());
+		} else {
+			// @NOTE we need to round up to the next second due to http-date resolution
+			const date = new Date(Date.now() + ((retryAfterOn413 + 1) * 1000)).toUTCString();
+			response.writeHead(413, {
+				'Retry-After': date,
+			});
+			response.end('');
+		}
+	});
+
+	const timeElapsedInMs = Number(await ky(server.url).text());
+	t.true(timeElapsedInMs >= retryAfterOn413 * 1000);
+	t.is(requestCount, retryAfterOn413 + 1);
+});
+
+test('doesn\'t retry on 413 without Retry-After header', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(413);
+	});
+
+	await t.throwsAsync(ky(server.url).text(), {message: /Payload Too Large/});
+	t.is(requestCount, 1);
+	await ky(server.url, {throwHttpErrors: false}).text();
+	t.is(requestCount, 2);
+});
+
+test('respect custom `afterStatusCodes` (500) with Retry-After header', async t => {
+	const startTime = Date.now();
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === defaultRetryCount + 1) {
+			response.end((Date.now() - startTime).toString());
+		} else {
+			response.writeHead(500, {
+				'Retry-After': retryAfterOn500,
+			});
+			response.end('');
+		}
+	});
+
+	const timeElapsedInMs = Number(await ky(server.url, {retry: {afterStatusCodes: [500]}}).text());
+	t.true(timeElapsedInMs >= retryAfterOn500 * 1000);
+	t.is(requestCount, retryAfterOn500 + 1);
+});
+
+test('custom `afterStatusCodes` does not retry statuses missing from `statusCodes`', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.writeHead(400, {
+			'Retry-After': 1,
+		});
+		response.end('');
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				afterStatusCodes: [400],
+			},
+		}).text(),
+		{
+			message: /Bad Request/,
+		},
+	);
+	t.is(requestCount, 1);
+});
+
+test('respect number of retries', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+	t.is(requestCount, 4);
+});
+
+test('respect retry methods', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.post('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			method: 'post',
+			retry: {
+				limit: 3,
+				methods: ['get'],
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+	t.is(requestCount, 1);
+
+	requestCount = 0;
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 2,
+				methods: ['get'],
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+	t.is(requestCount, defaultRetryCount + 1);
+});
+
+test('respect maxRetryAfter', async t => {
+	const retryCount = 4;
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.writeHead(413, {
+				'Retry-After': 1,
+			});
+
+			response.end('');
+		}
+	});
+
+	await withPerformance({
+		t,
+		expectedDuration: 420 + 420 + 420 + 420,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: {
+					limit: retryCount,
+					maxRetryAfter: 420,
+				},
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+
+	requestCount = 0;
+
+	await withPerformance({
+		t,
+		expectedDuration: 1000 + 1000 + 1000 + 1000,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: {
+					limit: retryCount,
+					maxRetryAfter: 2000,
+				},
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+});
+
+test.serial('invalid Retry-After header falls back to retry delay', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.writeHead(429, {
+				'Retry-After': 'not-a-valid-value',
+			});
+			response.end('');
+			return;
+		}
+
+		response.end(fixture);
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(server.url, {
+			timeout: false,
+			retry: {
+				limit: 1,
+				delay: () => 50,
+				maxRetryAfter: 10,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(50));
+		t.false(scheduledDelays.includes(10));
+	});
+
+	t.is(requestCount, 2);
+});
+
+test.serial('invalid 413 Retry-After header falls back to retry delay', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.writeHead(413, {
+				'Retry-After': 'not-a-valid-value',
+			});
+			response.end('');
+			return;
+		}
+
+		response.end(fixture);
+	});
+
+	await withCapturedTimeouts(async scheduledDelays => {
+		t.is(await ky(server.url, {
+			timeout: false,
+			retry: {
+				limit: 1,
+				delay: () => 50,
+				maxRetryAfter: 10,
+			},
+		}).text(), fixture);
+
+		t.true(scheduledDelays.includes(50));
+		t.false(scheduledDelays.includes(10));
+	});
+
+	t.is(requestCount, 2);
+});
+
+test('retry - can provide retry as number', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(ky(server.url, {retry: 4}).text(), {
+		message: /Request Timeout/,
+	});
+	t.is(requestCount, 5);
+});
+
+test('retry - extending a numeric `retry` with an object keeps the limit', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	// `retry: 3` is shorthand for `{limit: 3}`. Extending it with an object
+	// should preserve that limit instead of falling back to the default.
+	const extended = ky.create({retry: 3}).extend({retry: {methods: ['get']}});
+
+	await t.throwsAsync(extended(server.url).text(), {
+		message: /Request Timeout/,
+	});
+	t.is(requestCount, 4);
+});
+
+test('retry - shorthand expansion does not rewrite nested user data with a `retry` key', async t => {
+	const server = await createHttpTestServer(t);
+	server.post('/', (request, response) => {
+		response.json({body: request.body});
+	});
+
+	// A `retry` key inside the `json` body is user data, not the `retry` option,
+	// so the number-to-`{limit}` shorthand must not touch it.
+	const client = ky.create({json: {retry: 3}}).extend({json: {retry: {foo: 'bar'}}});
+
+	const {body} = await client.post(server.url).json<{body: {retry: unknown}}>();
+	t.deepEqual(body.retry, {foo: 'bar'});
+});
+
+test('doesn\'t retry on 413 with empty statusCodes and methods', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(413);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 10,
+				statusCodes: [],
+				methods: [],
+			},
+		}).text(),
+		{
+			message: /Payload Too Large/,
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('doesn\'t retry on 413 with empty methods', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(413);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 10,
+				methods: [],
+			},
+		}).text(),
+		{
+			message: /Payload Too Large/,
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('does retry on 408 with methods provided as array', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				methods: ['get'],
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+
+	t.is(requestCount, 4);
+});
+
+test('does retry on 408 with methods provided as uppercase array', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				methods: ['GET'],
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+
+	t.is(requestCount, 4);
+});
+
+test('does retry on 408 with statusCodes provided as array', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				statusCodes: [408],
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+
+	t.is(requestCount, 4);
+});
+
+test('doesn\'t retry when retry.limit is set to 0', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(408);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 0,
+			},
+		}).text(),
+		{
+			message: /Request Timeout/,
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('streaming body POST succeeds when retry.limit is 0', async t => {
+	const server = await createHttpTestServer(t, {bodyParser: false});
+	server.post('/', async (request, response) => {
+		response.send(await parseRawBody(request));
+	});
+
+	const body = 'hello stream';
+	const stream = new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(body));
+			controller.close();
+		},
+	});
+
+	const result = await ky.post(server.url, {
+		// @ts-expect-error - Types are outdated.
+		duplex: 'half',
+		body: stream,
+		retry: {limit: 0},
+	}).text();
+
+	t.is(result, body);
+});
+
+test('streaming body is canceled once when retry.limit is 0 and fetch throws', async t => {
+	let cancelCount = 0;
+	const stream = new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode('cancel me'));
+		},
+		cancel() {
+			cancelCount++;
+		},
+	});
+
+	const expectedError = new Error('fetch failed');
+	let fetchCallCount = 0;
+	await t.throwsAsync(ky.post('https://example.com', {
+		// @ts-expect-error - Types are outdated.
+		duplex: 'half',
+		body: stream,
+		retry: {limit: 0},
+		async fetch() {
+			fetchCallCount++;
+			throw expectedError;
+		},
+	}).text(), {
+		is: expectedError,
+	});
+
+	t.is(fetchCallCount, 1);
+	t.is(cancelCount, 1);
+});
+
+test('streaming body POST retries and succeeds when retry.limit is above 0', async t => {
+	let requestCount = 0;
+	const server = await createHttpTestServer(t, {bodyParser: false});
+	server.post('/', async (request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.sendStatus(408);
+			return;
+		}
+
+		response.send(await parseRawBody(request));
+	});
+
+	const body = 'retry stream body';
+	const stream = new ReadableStream({
+		start(controller) {
+			controller.enqueue(new TextEncoder().encode(body));
+			controller.close();
+		},
+	});
+
+	const result = await ky.post(server.url, {
+		// @ts-expect-error - Types are outdated.
+		duplex: 'half',
+		body: stream,
+		retry: {
+			limit: 1,
+			methods: ['post'],
+			statusCodes: [408],
+		},
+	}).text();
+
+	t.is(result, body);
+	t.is(requestCount, 2);
+});
+
+test('throws when retry.methods is not an array', async t => {
+	const server = await createHttpTestServer(t);
+
+	t.throws(() => {
+		void ky(server.url, {
+			retry: {
+				// @ts-expect-error
+				methods: 'get',
+			},
+		});
+	});
+});
+
+test('throws when retry.statusCodes is not an array', async t => {
+	const server = await createHttpTestServer(t);
+
+	t.throws(() => {
+		void ky(server.url, {
+			retry: {
+				// @ts-expect-error
+				statusCodes: 403,
+			},
+		});
+	});
+});
+
+test('retry options ignore undefined overrides and keep defaults', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(500);
+	});
+
+	await t.throwsAsync(ky(server.url, {
+		retry: {
+			limit: undefined,
+		},
+	}).text(), {message: /Internal Server Error/});
+
+	// Default limit is 2, so request should be attempted 3 times
+	t.is(requestCount, defaultRetryCount + 1);
+});
+
+test('respect maximum backoffLimit', async t => {
+	const retryCount = 4;
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await withPerformance({
+		t,
+		expectedDuration: 300 + 600 + 1200 + 2400,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: retryCount,
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+
+	requestCount = 0;
+
+	await withPerformance({
+		t,
+		expectedDuration: 300 + 600 + 1000 + 1000,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: {
+					limit: retryCount,
+					backoffLimit: 1000,
+				},
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+});
+
+test('backoffLimit: undefined treats as no limit (Infinity)', async t => {
+	const retryCount = 4;
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	// When backoffLimit is undefined, it should behave the same as no limit
+	// (i.e., delays should not be clamped, same as default behavior)
+	await withPerformance({
+		t,
+		expectedDuration: 300 + 600 + 1200 + 2400,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: {
+					limit: retryCount,
+					backoffLimit: undefined,
+				},
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+});
+
+test('respect custom retry.delay', async t => {
+	const retryCount = 4;
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await withPerformance({
+		t,
+		expectedDuration: 200 + 300 + 400 + 500,
+		async test() {
+			t.is(await ky(server.url, {
+				retry: {
+					limit: retryCount,
+					delay: n => 100 * (n + 1),
+				},
+			}).text(), fixture);
+		},
+	});
+
+	t.is(requestCount, 5);
+});
+
+test('jitter: true applies full jitter to delay', async t => {
+	const retryCount = 3;
+	let requestCount = 0;
+	const delays: number[] = [];
+	let lastTime = Date.now();
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		const now = Date.now();
+		if (requestCount > 0) {
+			delays.push(now - lastTime);
+		}
+
+		lastTime = now;
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await ky(server.url, {
+		retry: {
+			limit: retryCount,
+			jitter: true,
+		},
+	}).text();
+
+	t.is(requestCount, 4);
+
+	// Full jitter should produce delays between 0 and the computed delay
+	// Add 50% tolerance for system overhead and CI variability
+	t.true(delays[0] >= 0 && delays[0] <= 450);
+	t.true(delays[1] >= 0 && delays[1] <= 900);
+	t.true(delays[2] >= 0 && delays[2] <= 1800);
+});
+
+test('jitter: custom function applies custom jitter', async t => {
+	const retryCount = 3;
+	let requestCount = 0;
+	const jitterCalls: number[] = [];
+
+	const customJitter = (delay: number) => {
+		jitterCalls.push(delay);
+		return delay * 0.5; // Half the delay
+	};
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await ky(server.url, {
+		retry: {
+			limit: retryCount,
+			jitter: customJitter,
+		},
+	}).text();
+
+	t.is(requestCount, 4);
+	t.is(jitterCalls.length, 3); // Called for each retry
+
+	// Verify the jitter function received the correct delays
+	t.is(jitterCalls[0], 300); // First retry
+	t.is(jitterCalls[1], 600); // Second retry
+	t.is(jitterCalls[2], 1200); // Third retry
+});
+
+test('jitter respects backoffLimit', async t => {
+	const retryCount = 3;
+	let requestCount = 0;
+	const delays: number[] = [];
+	let lastTime = Date.now();
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		const now = Date.now();
+		if (requestCount > 0) {
+			delays.push(now - lastTime);
+		}
+
+		lastTime = now;
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await ky(server.url, {
+		retry: {
+			limit: retryCount,
+			backoffLimit: 500,
+			jitter: true,
+		},
+	}).text();
+
+	t.is(requestCount, 4);
+
+	// With backoffLimit of 500, all delays should be <= 500ms
+	// Even though the computed delays would be 300, 600, 1200
+	// After jitter and backoffLimit, they should all be <= 500
+	// Add 50% tolerance for system overhead and CI variability
+	t.true(delays[0] >= 0 && delays[0] <= 750);
+	t.true(delays[1] >= 0 && delays[1] <= 750);
+	t.true(delays[2] >= 0 && delays[2] <= 750);
+});
+
+test('jitter works with custom delay function', async t => {
+	const retryCount = 2;
+	let requestCount = 0;
+	const jitterCalls: number[] = [];
+
+	const customJitter = (delay: number) => {
+		jitterCalls.push(delay);
+		return delay * 0.5;
+	};
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === retryCount + 1) {
+			response.end(fixture);
+		} else {
+			response.sendStatus(500);
+		}
+	});
+
+	await ky(server.url, {
+		retry: {
+			limit: retryCount,
+			delay: n => 100 * n, // Custom delay: 100ms, 200ms, etc.
+			jitter: customJitter,
+		},
+	}).text();
+
+	t.is(requestCount, 3);
+	t.is(jitterCalls.length, 2);
+	t.is(jitterCalls[0], 100); // First retry with custom delay
+	t.is(jitterCalls[1], 200); // Second retry with custom delay
+});
+
+test('jitter is not applied when Retry-After header is present', async t => {
+	const startTime = Date.now();
+	let requestCount = 0;
+	const jitterCalls: number[] = [];
+
+	const customJitter = (delay: number) => {
+		jitterCalls.push(delay);
+		return delay * 0.5;
+	};
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+
+		if (requestCount === 3) {
+			response.end((Date.now() - startTime).toString());
+		} else {
+			response.writeHead(429, {
+				'Retry-After': 1,
+			});
+			response.end('');
+		}
+	});
+
+	const timeElapsedInMs = Number(await ky(server.url, {
+		retry: {
+			jitter: customJitter,
+		},
+	}).text());
+
+	// Should have made 3 requests (initial + 2 retries)
+	t.is(requestCount, 3);
+	// Jitter function should NOT have been called when Retry-After is present
+	t.is(jitterCalls.length, 0);
+	// Should have waited at least 2 seconds (1s per retry)
+	t.true(timeElapsedInMs >= 2000);
+});
+
+test('retryOnTimeout: false (default) - does not retry on timeout', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		// Delay longer than timeout to trigger timeout
+		await delay(1000);
+		response.end(fixture);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			timeout: 500,
+			retry: {
+				limit: 3,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1); // Should not retry
+});
+
+test('timeout: false does not throw TimeoutError during retries', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.sendStatus(500);
+			return;
+		}
+
+		response.end(fixture);
+	});
+
+	const result = await ky(server.url, {
+		timeout: false,
+		retry: {
+			limit: 1,
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 2);
+});
+
+test('retryOnTimeout: each retry gets the full per-attempt timeout', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			// Delay longer than timeout to trigger timeout
+			await delay(1000);
+			response.end(fixture);
+			return;
+		}
+
+		response.end(fixture);
+	});
+
+	const result = await ky(server.url, {
+		timeout: 500,
+		retry: {
+			limit: 3,
+			retryOnTimeout: true,
+			delay: () => 0,
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3);
+});
+
+test('totalTimeout takes precedence over retry limit', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		// Each attempt takes 300ms
+		await delay(300);
+		return new Response('', {status: 500});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			totalTimeout: 500,
+			retry: {
+				limit: 10,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+	// Each attempt takes ~300ms. With 500ms totalTimeout, only 1-2 attempts fit
+	// before the budget is exhausted (far fewer than the limit of 10).
+	t.true(requestCount >= 1 && requestCount <= 2);
+});
+
+test('shouldRetry: returns true cannot exceed totalTimeout budget', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		await delay(300);
+		return new Response('', {status: 500});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			totalTimeout: 500,
+			retry: {
+				limit: 5,
+				shouldRetry: () => true,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+	// At most 1-2 attempts fit within the 500ms totalTimeout (each takes ~300ms)
+	t.true(requestCount >= 1 && requestCount <= 2);
+});
+
+test('shouldRetry: returns false - prevents retry', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.sendStatus(500); // Normally retriable
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				shouldRetry: () => false, // Prevent all retries
+			},
+		}).text(),
+		{
+			message: /Internal Server Error/,
+		},
+	);
+
+	t.is(requestCount, 1); // No retries
+});
+
+test('shouldRetry: returns undefined - uses default retry logic', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			response.sendStatus(500); // Retriable
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	const result = await ky(server.url, {
+		retry: {
+			limit: 3,
+			shouldRetry: () => undefined, // Fall through to default
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3); // Default retry behavior
+});
+
+test('shouldRetry: receives correct state object', async t => {
+	let requestCount = 0;
+	const states: Array<{errorName: string; retryCount: number}> = [];
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			response.sendStatus(500);
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	await ky(server.url, {
+		retry: {
+			limit: 3,
+			shouldRetry({error, retryCount}) {
+				states.push({errorName: error.name, retryCount});
+				return undefined; // Use default logic
+			},
+		},
+	}).text();
+
+	t.is(states.length, 2);
+	t.is(states[0].errorName, 'HTTPError');
+	t.is(states[0].retryCount, 1); // First retry
+	t.is(states[1].errorName, 'HTTPError');
+	t.is(states[1].retryCount, 2); // Second retry
+});
+
+test('shouldRetry: custom business logic with HTTPError', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.sendStatus(400);
+		} else if (requestCount === 2) {
+			response.sendStatus(500);
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	const result = await ky(server.url, {
+		retry: {
+			limit: 3,
+			async shouldRetry({error, retryCount}) {
+				const {HTTPError} = await import('../source/index.js');
+				if (error instanceof HTTPError) {
+					const {status} = error.response;
+					if (status === 400 && retryCount <= 1) {
+						return true;
+					}
+
+					if (status >= 400 && status < 500) {
+						return false;
+					}
+				}
+
+				return undefined;
+			},
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3);
+});
+
+test('shouldRetry: error propagates if shouldRetry throws', async t => {
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		response.sendStatus(500);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				shouldRetry() {
+					throw new Error('shouldRetry failed');
+				},
+			},
+		}).text(),
+		{
+			message: 'shouldRetry failed',
+		},
+	);
+});
+
+test('shouldRetry: works with TimeoutError', async t => {
+	let requestCount = 0;
+	const errorNames: string[] = [];
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		// Delay longer than timeout to trigger timeout
+		await delay(1000);
+		response.end(fixture);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			timeout: 500,
+			retry: {
+				limit: 3,
+				async shouldRetry({error}) {
+					errorNames.push(error.name);
+					return error instanceof TimeoutError;
+				},
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+	// Each retry gets the full per-attempt timeout, so shouldRetry is called for each of the 3 retries
+	t.deepEqual(errorNames, ['TimeoutError', 'TimeoutError', 'TimeoutError']);
+	t.is(requestCount, 4);
+});
+
+test('each retry gets the full per-attempt timeout (not a shared budget)', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			// First attempt: consume most of a 2000ms timeout, then return 500
+			await delay(1500);
+			response.sendStatus(500);
+			return;
+		}
+
+		// Second attempt: also takes 1500ms, which would fail if timeout were a shared budget
+		// (only ~500ms would remain), but succeeds because each retry gets the full 2000ms
+		await delay(1500);
+		response.end(fixture);
+	});
+
+	const result = await ky(server.url, {
+		timeout: 2000,
+		retry: {
+			limit: 1,
+			delay: () => 0,
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 2);
+});
+
+test('Retry-After delay is bounded by totalTimeout budget', async t => {
+	let requestCount = 0;
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		response.writeHead(429, {
+			'Retry-After': 5,
+		});
+		response.end('');
+	});
+
+	let timeoutError: Error | undefined;
+	await withPerformance({
+		t,
+		expectedDuration: 1000,
+		async test() {
+			timeoutError = await t.throwsAsync(ky(server.url, {
+				totalTimeout: 1000,
+				retry: {
+					limit: 15,
+				},
+			}).text());
+		},
+	});
+
+	t.is(timeoutError?.name, 'TimeoutError');
+	t.is(requestCount, 1);
+});
+
+test('shouldRetry: precedence over retryOnTimeout', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', async (_request, response) => {
+		requestCount++;
+		// Delay longer than timeout to trigger timeout
+		await delay(1000);
+		response.end(fixture);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			timeout: 500,
+			retry: {
+				limit: 3,
+				retryOnTimeout: true, // Would retry
+				shouldRetry: () => false, // But shouldRetry prevents it
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1); // No retries
+});
+
+test('shouldRetry: works with synchronous function', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			response.sendStatus(400);
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	const result = await ky(server.url, {
+		retry: {
+			limit: 3,
+			shouldRetry: () => true, // Sync function returning true
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3);
+});
+
+test('shouldRetry: non-boolean return values fall through to default logic', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			response.sendStatus(500); // Retriable by default
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	// Test with various non-boolean return values - all should fall through
+	const result = await ky(server.url, {
+		retry: {
+			limit: 3,
+			shouldRetry: () => 42 as any, // Non-boolean (number) falls through
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3); // Should retry using default logic
+});
+
+test('shouldRetry: receives proper Error instance even for HTTPError', async t => {
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		response.sendStatus(404);
+	});
+
+	let receivedError: Error | undefined;
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 1,
+				shouldRetry({error}) {
+					receivedError = error;
+					// Verify it's a proper Error instance
+					t.true(error instanceof Error);
+					t.is(error.name, 'HTTPError');
+					return false;
+				},
+			},
+		}).text(),
+	);
+
+	// Ensure shouldRetry was called
+	t.truthy(receivedError);
+});
+
+test('shouldRetry: combines with default status code logic when returning undefined', async t => {
+	let requestCount = 0;
+	const capturedStatuses: number[] = [];
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount === 1) {
+			response.sendStatus(500); // Retriable
+		} else if (requestCount === 2) {
+			response.sendStatus(404); // Not retriable
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				async shouldRetry({error}) {
+					const {HTTPError} = await import('../source/index.js');
+					if (error instanceof HTTPError) {
+						capturedStatuses.push(error.response.status);
+					}
+
+					return undefined; // Fall through to default logic
+				},
+			},
+		}).text(),
+		{
+			message: /Not Found/,
+		},
+	);
+
+	// Should retry on 500, then fail on 404
+	t.is(requestCount, 2);
+	t.deepEqual(capturedStatuses, [500, 404]);
+});
+
+test('shouldRetry: retryCount starts at 1 for first retry', async t => {
+	const retryCounts: number[] = [];
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		response.sendStatus(500);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				shouldRetry({retryCount}) {
+					retryCounts.push(retryCount);
+					return retryCount < 3; // Stop at 3rd retry
+				},
+			},
+		}).text(),
+	);
+
+	t.deepEqual(retryCounts, [1, 2, 3]);
+});
+
+test('shouldRetry: handles Promise return value correctly', async t => {
+	let requestCount = 0;
+
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		requestCount++;
+		if (requestCount <= 2) {
+			response.sendStatus(400);
+		} else {
+			response.end(fixture);
+		}
+	});
+
+	const result = await ky(server.url, {
+		retry: {
+			limit: 3,
+			shouldRetry: async () => true,
+		},
+	}).text();
+
+	t.is(result, fixture);
+	t.is(requestCount, 3);
+});
+
+test('shouldRetry: error propagates if shouldRetry returns rejected Promise', async t => {
+	const server = await createHttpTestServer(t);
+	server.get('/', (_request, response) => {
+		response.sendStatus(500);
+	});
+
+	await t.throwsAsync(
+		ky(server.url, {
+			retry: {
+				limit: 3,
+				// eslint-disable-next-line @typescript-eslint/promise-function-async
+				shouldRetry: () => Promise.reject(new Error('shouldRetry Promise rejected')),
+			},
+		}).text(),
+		{
+			message: 'shouldRetry Promise rejected',
+		},
+	);
+});
+
+test('totalTimeout with timeout: false - per-attempt disabled, total enabled', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		if (requestCount === 1) {
+			// First attempt takes too long
+			await delay(300);
+			return new Response('', {status: 500});
+		}
+
+		return new Response('ok');
+	};
+
+	const result = await ky('https://example.com', {
+		fetch: customFetch,
+		timeout: false,
+		totalTimeout: 2000,
+		retry: {
+			limit: 2,
+			delay: () => 0,
+		},
+	}).text();
+
+	t.is(result, 'ok');
+	t.is(requestCount, 2);
+});
+
+test('totalTimeout with timeout: false - exceeds total budget', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		await delay(600);
+		return new Response('', {status: 500});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: false,
+			totalTimeout: 500,
+			retry: {
+				limit: 5,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('totalTimeout bounds hanging HTTPError body reads when timeout is disabled', async t => {
+	t.timeout(2000);
+	let requestCount = 0;
+	let hookError: Error | undefined;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"error":"partial"'));
+			},
+		});
+
+		return new Response(body, {
+			status: 500,
+			headers: {'content-type': 'application/json'},
+		});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: false,
+			totalTimeout: 250,
+			retry: {
+				limit: 5,
+				delay: () => 0,
+			},
+			hooks: {
+				beforeError: [
+					({error}) => {
+						hookError = error;
+						error.message = 'http-error-body-timeout-beforeError';
+						return error;
+					},
+				],
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+			message: 'http-error-body-timeout-beforeError',
+		},
+	);
+
+	t.is(requestCount, 1);
+	t.true(hookError instanceof TimeoutError);
+});
+
+test('totalTimeout bounds hanging HTTPError body reads when timeout is larger', async t => {
+	t.timeout(2000);
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"error":"partial"'));
+			},
+		});
+
+		return new Response(body, {
+			status: 500,
+			headers: {'content-type': 'application/json'},
+		});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: 1000,
+			totalTimeout: 250,
+			retry: {
+				limit: 5,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test.serial('totalTimeout is rechecked after per-attempt HTTPError body timeout', async t => {
+	t.timeout(2000);
+	const originalPerformanceNow = globalThis.performance.now;
+	let performanceNowCallCount = 0;
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+
+		const body = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"error":"partial"'));
+			},
+		});
+
+		return new Response(body, {
+			status: 500,
+			headers: {'content-type': 'application/json'},
+		});
+	};
+
+	globalThis.performance.now = () => {
+		performanceNowCallCount++;
+		return performanceNowCallCount < 4 ? 0 : 100;
+	};
+
+	try {
+		await t.throwsAsync(
+			ky('https://example.com', {
+				fetch: customFetch,
+				timeout: 50,
+				totalTimeout: 51,
+				retry: 0,
+			}).text(),
+			{
+				name: 'TimeoutError',
+			},
+		);
+	} finally {
+		globalThis.performance.now = originalPerformanceNow;
+	}
+
+	t.is(requestCount, 1);
+	t.true(performanceNowCallCount >= 4);
+});
+
+test('totalTimeout bounds hanging HTTPError parseJson when timeout is disabled', async t => {
+	t.timeout(2000);
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		return new Response('{"error":"parse-timeout"}', {
+			status: 500,
+			headers: {'content-type': 'application/json'},
+		});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: false,
+			totalTimeout: 250,
+			parseJson: async () => new Promise<never>(() => {
+				// Intentionally never settles
+			}),
+			retry: {
+				limit: 5,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('totalTimeout smaller than timeout - effective timeout is capped', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		// Takes 800ms, within the 10s per-attempt timeout but exceeding 500ms totalTimeout
+		await delay(800);
+		return new Response('ok');
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: 10_000,
+			totalTimeout: 500,
+			retry: {
+				limit: 2,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.is(requestCount, 1);
+});
+
+test('totalTimeout: 0 throws immediately', async t => {
+	let fetchCalled = false;
+
+	const customFetch: typeof fetch = async () => {
+		fetchCalled = true;
+		return new Response('ok');
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			totalTimeout: 0,
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.false(fetchCalled);
+});
+
+test('totalTimeout exceeding maxSafeTimeout throws RangeError', async t => {
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: async () => new Response('ok'),
+			totalTimeout: 2_147_483_648,
+		}).text(),
+		{
+			instanceOf: RangeError,
+		},
+	);
+});
+
+test('totalTimeout expires mid-delay between retries', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		return new Response('', {status: 500});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			totalTimeout: 200,
+			retry: {
+				limit: 5,
+				// Delay is 500ms, longer than the remaining totalTimeout budget
+				delay: () => 500,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	// First request succeeds quickly, but the 500ms delay exceeds the remaining budget
+	t.is(requestCount, 1);
+});
+
+test('totalTimeout caps total time while timeout caps each attempt', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		// Each attempt takes 200ms (within 300ms per-attempt timeout)
+		await delay(200);
+		return new Response('', {status: 500});
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: 300,
+			totalTimeout: 800,
+			retry: {
+				limit: 10,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.true(requestCount >= 2 && requestCount < 10, `Expected totalTimeout to allow retries but cap below the retry limit, got ${requestCount}`);
+});
+
+test('totalTimeout works with ky.create()', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		await delay(600);
+		return new Response('', {status: 500});
+	};
+
+	const api = ky.create({
+		fetch: customFetch,
+		totalTimeout: 500,
+		retry: {
+			limit: 3,
+			delay: () => 0,
+		},
+	});
+
+	await t.throwsAsync(api('https://example.com').text(), {
+		name: 'TimeoutError',
+	});
+
+	t.is(requestCount, 1);
+});
+
+test('totalTimeout can be overridden via extend()', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		await delay(10);
+		if (requestCount <= 2) {
+			return new Response('', {status: 500});
+		}
+
+		return new Response('ok');
+	};
+
+	const parent = ky.create({
+		fetch: customFetch,
+		totalTimeout: 1,
+		retry: {
+			limit: 3,
+			delay: () => 0,
+		},
+	});
+
+	// Override totalTimeout to a generous value
+	const child = parent.extend({totalTimeout: 10_000});
+
+	const result = await child('https://example.com').text();
+	t.is(result, 'ok');
+	t.is(requestCount, 3);
+});
+
+test('totalTimeout can be disabled via extend()', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		if (requestCount === 1) {
+			await delay(200);
+			return new Response('', {status: 500});
+		}
+
+		return new Response('ok');
+	};
+
+	const parent = ky.create({
+		fetch: customFetch,
+		totalTimeout: 100,
+		retry: {
+			limit: 2,
+			delay: () => 0,
+		},
+	});
+
+	// Disable totalTimeout
+	const child = parent.extend({totalTimeout: false});
+
+	const result = await child('https://example.com').text();
+	t.is(result, 'ok');
+	t.is(requestCount, 2);
+});
+
+test('totalTimeout with retryOnTimeout: true caps total time across retries', async t => {
+	let requestCount = 0;
+
+	const customFetch: typeof fetch = async () => {
+		requestCount++;
+		// Each attempt takes longer than the per-attempt timeout, so every attempt times out.
+		await delay(300);
+		return new Response('ok');
+	};
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			fetch: customFetch,
+			timeout: 100,
+			totalTimeout: 2000,
+			retry: {
+				limit: 30,
+				retryOnTimeout: true,
+				delay: () => 0,
+			},
+		}).text(),
+		{
+			name: 'TimeoutError',
+		},
+	);
+
+	t.true(requestCount >= 2 && requestCount < 30, `Expected retryOnTimeout to retry but totalTimeout to cap below the retry limit, got ${requestCount}`);
+});
+
+test('NetworkError wraps fetch network errors', async t => {
+	const error = await t.throwsAsync(
+		ky('https://example.com', {
+			retry: 0,
+			async fetch() {
+				throw new TypeError('Failed to fetch');
+			},
+		}),
+	);
+
+	t.true(error instanceof NetworkError);
+	t.true(isNetworkError(error));
+	t.true(isKyError(error));
+	t.is(error.name, 'NetworkError');
+	t.true(error.request.url.includes('example.com'));
+	t.true(error.cause instanceof TypeError);
+	t.is((error.cause as TypeError).message, 'Failed to fetch');
+	t.is(error.message, 'Request failed due to a network error: GET https://example.com/');
+});
+
+test('NetworkError wraps Safari network errors with domain', async t => {
+	const error = await t.throwsAsync(
+		ky('https://example.com', {
+			retry: 0,
+			async fetch() {
+				const error = new TypeError('Load failed (api.example.com)');
+				error.stack = undefined;
+				throw error;
+			},
+		}),
+	);
+
+	t.true(error instanceof NetworkError);
+	t.true(isNetworkError(error));
+	t.true(error!.cause instanceof TypeError);
+	t.is((error!.cause as TypeError).message, 'Load failed (api.example.com)');
+});
+
+test('NetworkError does not wrap stacked Safari Load failed errors with domain', async t => {
+	const error = await t.throwsAsync(
+		ky('https://example.com', {
+			retry: 0,
+			async fetch() {
+				throw new TypeError('Load failed (api.example.com)');
+			},
+		}),
+	);
+
+	t.true(error instanceof TypeError);
+	t.false(isNetworkError(error));
+	t.is(error.message, 'Load failed (api.example.com)');
+});
+
+test('non-network TypeError is not retried', async t => {
+	let fetchCallCount = 0;
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			retry: {
+				limit: 2,
+				delay: () => 0,
+			},
+			async fetch() {
+				fetchCallCount++;
+				throw new TypeError('Cannot read properties of undefined');
+			},
+		}),
+		{instanceOf: TypeError},
+	);
+
+	t.is(fetchCallCount, 1);
+});
+
+test('shouldRetry can force retry of non-network errors', async t => {
+	let fetchCallCount = 0;
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			retry: {
+				limit: 2,
+				delay: () => 0,
+				shouldRetry: () => true,
+			},
+			async fetch() {
+				fetchCallCount++;
+				throw new TypeError('Cannot read properties of undefined');
+			},
+		}),
+		{instanceOf: TypeError},
+	);
+
+	// 1 initial + 2 retries
+	t.is(fetchCallCount, 3);
+});
+
+test('NetworkError is retried by default', async t => {
+	let fetchCallCount = 0;
+
+	const result = await ky('https://example.com', {
+		retry: {
+			limit: 2,
+			delay: () => 0,
+		},
+		async fetch() {
+			fetchCallCount++;
+			if (fetchCallCount <= 2) {
+				throw new TypeError('Failed to fetch');
+			}
+
+			return new Response('ok');
+		},
+	}).text();
+
+	t.is(result, 'ok');
+	t.is(fetchCallCount, 3);
+});
+
+test('NetworkError is not retried for non-retriable method (POST)', async t => {
+	let fetchCallCount = 0;
+
+	const error = await t.throwsAsync(
+		ky.post('https://example.com', {
+			retry: {
+				limit: 2,
+				delay: () => 0,
+			},
+			async fetch() {
+				fetchCallCount++;
+				throw new TypeError('Failed to fetch');
+			},
+		}),
+	);
+
+	t.true(isNetworkError(error));
+	t.is(fetchCallCount, 1);
+});
+
+test('shouldRetry receives NetworkError (not raw TypeError)', async t => {
+	let receivedError: Error | undefined;
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			retry: {
+				limit: 1,
+				delay: () => 0,
+				shouldRetry({error}) {
+					receivedError = error;
+					return false;
+				},
+			},
+			async fetch() {
+				throw new TypeError('Failed to fetch');
+			},
+		}),
+	);
+
+	t.true(isNetworkError(receivedError));
+	t.true(receivedError!.cause instanceof TypeError);
+});
+
+test('non-network TypeError is not wrapped in NetworkError', async t => {
+	const error = await t.throwsAsync(
+		ky('https://example.com', {
+			retry: 0,
+			async fetch() {
+				throw new TypeError('Cannot read properties of undefined');
+			},
+		}),
+	);
+
+	t.true(error instanceof TypeError);
+	t.false(isNetworkError(error));
+	t.is(error.message, 'Cannot read properties of undefined');
+});
+
+test('shouldRetry returning undefined for NetworkError falls through to default retry', async t => {
+	let fetchCallCount = 0;
+
+	const result = await ky('https://example.com', {
+		retry: {
+			limit: 2,
+			delay: () => 0,
+			shouldRetry() {
+				return undefined;
+			},
+		},
+		async fetch() {
+			fetchCallCount++;
+			if (fetchCallCount <= 2) {
+				throw new TypeError('Failed to fetch');
+			}
+
+			return new Response('ok');
+		},
+	}).text();
+
+	t.is(result, 'ok');
+	t.is(fetchCallCount, 3);
+});
+
+test('beforeError hook receives NetworkError with cause chain', async t => {
+	let receivedError: Error | undefined;
+
+	await t.throwsAsync(
+		ky('https://example.com', {
+			retry: 0,
+			async fetch() {
+				throw new TypeError('Failed to fetch');
+			},
+			hooks: {
+				beforeError: [
+					({error}) => {
+						receivedError = error;
+						return error;
+					},
+				],
+			},
+		}),
+	);
+
+	t.true(receivedError instanceof NetworkError);
+	t.true(isNetworkError(receivedError));
+	t.is(receivedError!.name, 'NetworkError');
+	t.true(receivedError!.cause instanceof TypeError);
+	t.is((receivedError!.cause as TypeError).message, 'Failed to fetch');
+});
+
+test('NetworkError is thrown when timeout is disabled', async t => {
+	const error = await t.throwsAsync(
+		ky('https://example.com', {
+			timeout: false,
+			retry: 0,
+			async fetch() {
+				throw new TypeError('Failed to fetch');
+			},
+		}),
+	);
+
+	t.true(isNetworkError(error));
+	t.is(error.name, 'NetworkError');
+	t.true(error.cause instanceof TypeError);
+});

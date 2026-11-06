@@ -1,0 +1,520 @@
+/* VeriGraph Workbench -- design tokens
+   Direction: a "black-box flight recorder" for agent trajectories. The
+   subject is telemetry (stock/flow readings, hazard percentages, alarm
+   states), so the surface reads like an instrument panel, not a marketing
+   page: near-black chassis, hairline dividers, tabular mono numerals,
+   signal-light color coding (green=Nominal, amber=VERIFY, red=ALARM). */
+
+:root {
+  --bg-base: #0a0c0e;
+  --bg-panel: #12161a;
+  --bg-panel-raised: #171c21;
+  --bg-inset: #0d1013;
+  --border-hairline: #262d34;
+  --border-bright: #3a434c;
+
+  --text-primary: #e7ecef;
+  --text-muted: #8b95a1;
+  --text-dim: #4b535a;
+
+  --accent-nominal: #34d399;
+  --accent-verify: #f2a93b;
+  --accent-alarm: #f0555b;
+  --accent-info: #57a6ff;
+
+  --font-display: -apple-system, 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-body: -apple-system, 'Segoe UI', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Code', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  background-image: radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.025) 1px, transparent 0);
+  background-size: 22px 22px;
+  color: var(--text-primary);
+  font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+}
+
+.tabular {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+::selection {
+  background: rgba(87, 166, 255, 0.3);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent-info);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.001ms !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* ---- Layout ---------------------------------------------------------- */
+
+.app-shell {
+  display: flex;
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  width: 240px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border-hairline);
+  background: var(--bg-panel);
+  padding: 20px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.app-brand {
+  padding: 0 20px 18px;
+  border-bottom: 1px solid var(--border-hairline);
+  margin-bottom: 12px;
+}
+
+.app-brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.app-brand-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent-nominal);
+  box-shadow: 0 0 8px rgba(52, 211, 153, 0.7);
+  flex-shrink: 0;
+}
+
+.app-brand-title {
+  font-family: var(--font-display);
+  font-weight: 650;
+  font-size: 15px;
+  letter-spacing: 0.01em;
+}
+
+.app-brand-sub {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 12px;
+}
+
+.app-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 10px;
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  text-align: left;
+  width: 100%;
+  font-family: var(--font-body);
+}
+
+.app-nav-item:hover {
+  background: var(--bg-panel-raised);
+  color: var(--text-primary);
+}
+
+.app-nav-item.active {
+  background: var(--bg-panel-raised);
+  color: var(--text-primary);
+  box-shadow: inset 2px 0 0 var(--accent-info);
+}
+
+.app-nav-index {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  width: 16px;
+}
+
+.app-footer-note {
+  margin-top: auto;
+  padding: 14px 20px 4px;
+  font-size: 10.5px;
+  line-height: 1.5;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border-hairline);
+}
+
+.app-footer-note a {
+  color: var(--text-muted);
+}
+
+.app-main {
+  flex: 1;
+  min-width: 0;
+  padding: 32px 40px 60px;
+  max-width: 980px;
+}
+
+.view-header {
+  margin-bottom: 24px;
+}
+
+.view-eyebrow {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-info);
+  margin-bottom: 8px;
+}
+
+.view-title {
+  font-family: var(--font-display);
+  font-size: 22px;
+  font-weight: 650;
+  margin: 0 0 8px;
+}
+
+.view-description {
+  font-size: 13.5px;
+  color: var(--text-muted);
+  line-height: 1.6;
+  max-width: 640px;
+}
+
+/* ---- Panels ------------------------------------------------------------ */
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  padding: 20px 22px;
+  margin-bottom: 20px;
+}
+
+.panel-title {
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 650;
+  margin: 0 0 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-subtitle {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 16px;
+  line-height: 1.55;
+}
+
+.disclosure {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+  border-left: 2px solid var(--accent-verify);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--text-muted);
+  margin-bottom: 16px;
+}
+
+.disclosure strong {
+  color: var(--text-primary);
+}
+
+.warning-banner {
+  background: rgba(240, 85, 91, 0.08);
+  border: 1px solid rgba(240, 85, 91, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: #f5989c;
+  margin-bottom: 16px;
+}
+
+/* ---- Data table ---------------------------------------------------------*/
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.data-table th {
+  text-align: left;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  font-weight: 500;
+  padding: 0 10px 8px 0;
+  border-bottom: 1px solid var(--border-hairline);
+}
+
+.data-table td {
+  padding: 7px 10px 7px 0;
+  border-bottom: 1px solid var(--border-hairline);
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+}
+
+.data-table tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table td.label {
+  font-family: var(--font-body);
+  color: var(--text-muted);
+}
+
+/* ---- Signal / verdict chips -------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.chip::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.chip-nominal {
+  color: var(--accent-nominal);
+  background: rgba(52, 211, 153, 0.1);
+}
+.chip-nominal::before {
+  background: var(--accent-nominal);
+}
+
+.chip-verify {
+  color: var(--accent-verify);
+  background: rgba(242, 169, 59, 0.12);
+}
+.chip-verify::before {
+  background: var(--accent-verify);
+}
+
+.chip-alarm {
+  color: var(--accent-alarm);
+  background: rgba(240, 85, 91, 0.12);
+}
+.chip-alarm::before {
+  background: var(--accent-alarm);
+  box-shadow: 0 0 6px rgba(240, 85, 91, 0.8);
+}
+
+/* ---- Hazard tape (signature element) ------------------------------------
+   A flight-recorder strip: one segment per trace step, colored by verdict,
+   with a thin recording-head marker. This is the one place the design
+   spends its "boldness budget" -- everything else stays quiet. */
+
+.hazard-tape {
+  display: flex;
+  gap: 2px;
+  height: 40px;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  padding: 4px;
+  background: var(--bg-inset);
+  overflow-x: auto;
+}
+
+.hazard-tape-segment {
+  flex: 0 0 10px;
+  border-radius: 1px;
+  position: relative;
+  transition: transform 120ms ease;
+  cursor: default;
+}
+
+.hazard-tape-segment:hover {
+  transform: scaleY(1.15);
+}
+
+.hazard-tape-segment.nominal {
+  background: rgba(52, 211, 153, 0.55);
+}
+.hazard-tape-segment.verify {
+  background: var(--accent-verify);
+}
+.hazard-tape-segment.alarm {
+  background: var(--accent-alarm);
+  box-shadow: 0 0 6px rgba(240, 85, 91, 0.6);
+}
+
+/* ---- Form controls ------------------------------------------------------*/
+
+.field-label {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+textarea.trace-input {
+  width: 100%;
+  min-height: 220px;
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 12px;
+  resize: vertical;
+}
+
+textarea.trace-input:focus {
+  border-color: var(--accent-info);
+}
+
+select,
+input[type='number'] {
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 10px;
+}
+
+.btn {
+  font-family: var(--font-body);
+  font-size: 12.5px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-bright);
+  background: var(--bg-panel-raised);
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--accent-info);
+}
+
+.btn-primary {
+  background: var(--accent-info);
+  border-color: var(--accent-info);
+  color: #06121f;
+}
+
+.btn-primary:hover {
+  filter: brightness(1.08);
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.control-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 1px;
+  background: var(--border-hairline);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  margin-bottom: 20px;
+}
+
+.stat-cell {
+  background: var(--bg-panel);
+  padding: 14px 16px;
+}
+
+.stat-cell-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.stat-cell-value {
+  font-family: var(--font-mono);
+  font-size: 19px;
+  font-weight: 600;
+}
+
+.error-box {
+  background: rgba(240, 85, 91, 0.08);
+  border: 1px solid rgba(240, 85, 91, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: #f5989c;
+  white-space: pre-wrap;
+}
+
+code.inline {
+  font-family: var(--font-mono);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-hairline);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 11.5px;
+}

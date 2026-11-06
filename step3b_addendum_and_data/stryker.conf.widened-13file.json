@@ -1,0 +1,29 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "packageManager": "npm",
+  "testRunner": "command",
+  "coverageAnalysis": "off",
+  "commandRunner": {
+    "command": "npx ava --timeout=60s test/main.ts test/retry.ts test/hooks.ts test/http-error.ts --match='!*totalTimeout bounds a never-ending successful response body*'"
+  },
+  "mutate": [
+    "source/utils/is-network-error.ts",
+    "source/utils/delay.ts",
+    "source/utils/timeout.ts",
+    "source/utils/normalize.ts",
+    "source/utils/is.ts",
+    "source/utils/types.ts",
+    "source/errors/ForceRetryError.ts",
+    "source/errors/NetworkError.ts",
+    "source/errors/NonError.ts",
+    "source/errors/TimeoutError.ts",
+    "source/errors/KyError.ts",
+    "source/errors/HTTPError.ts",
+    "source/errors/SchemaValidationError.ts"
+  ],
+  "reporters": ["json", "clear-text"],
+  "concurrency": 1,
+  "timeoutMS": 90000,
+  "tempDirName": "stryker-tmp",
+  "cleanTempDir": true
+}

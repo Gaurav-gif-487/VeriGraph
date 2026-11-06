@@ -1,0 +1,251 @@
+import test from 'ava';
+import ky from '../source/index.js';
+import {createHttpTestServer} from './helpers/create-http-test-server.js';
+
+const fixture = 'https://example.com/unicorn';
+
+test('fetch option takes a custom fetch function', async t => {
+	t.plan(10);
+
+	const customFetch: typeof fetch = async input => {
+		if (!(input instanceof Request)) {
+			throw new TypeError('Expected to have input as request');
+		}
+
+		return new Response(input.url);
+	};
+
+	t.is(await ky(fixture, {fetch: customFetch}).text(), fixture);
+	t.is(
+		await ky(fixture, {
+			fetch: customFetch,
+			searchParams: {foo: 'bar'},
+		}).text(),
+		`${fixture}?foo=bar`,
+	);
+	t.is(
+		await ky(fixture, {
+			fetch: customFetch,
+			searchParams: {},
+		}).text(),
+		`${fixture}`,
+	);
+	t.is(
+		await ky(fixture, {
+			fetch: customFetch,
+			searchParams: [],
+		}).text(),
+		`${fixture}`,
+	);
+	t.is(
+		await ky(fixture, {
+			fetch: customFetch,
+			searchParams: new URLSearchParams(),
+		}).text(),
+		`${fixture}`,
+	);
+	t.is(
+		await ky(fixture, {
+			fetch: customFetch,
+			searchParams: '  ',
+		}).text(),
+		`${fixture}`,
+	);
+	t.is(
+		await ky(`${fixture}#hash`, {
+			fetch: customFetch,
+			searchParams: 'foo',
+		}).text(),
+		`${fixture}?foo#hash`,
+	);
+	t.is(
+		await ky(`${fixture}?old`, {
+			fetch: customFetch,
+			searchParams: 'new',
+		}).text(),
+		`${fixture}?old&new`,
+	);
+	t.is(
+		await ky(`${fixture}?old#hash`, {
+			fetch: customFetch,
+			searchParams: 'new',
+		}).text(),
+		`${fixture}?old&new#hash`,
+	);
+	t.is(await ky('unicorn', {fetch: customFetch, prefix: `${fixture}/api/`}).text(), `${fixture}/api/unicorn`);
+});
+
+test('options are correctly passed to Fetch #1', async t => {
+	t.plan(1);
+
+	const cache = 'no-store';
+
+	const customFetch: typeof fetch = async request => {
+		t.is(request.cache, cache);
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {cache, fetch: customFetch}).text();
+});
+
+test('options are correctly passed to Fetch #2', async t => {
+	const server = await createHttpTestServer(t);
+
+	server.post('/anything', (request, response) => {
+		response.json({json: request.body});
+	});
+
+	const fixture = {x: true};
+	const json = await ky.post(`${server.url}/anything`, {json: fixture}).json();
+	t.deepEqual(json.json, fixture);
+});
+
+test('post with json does not hang when custom fetch consumes request body', async t => {
+	const fixture = {x: true};
+
+	const customFetch: typeof fetch = async request => {
+		t.is(request.method, 'POST');
+		const parsedBody = await request.json();
+
+		return new Response(JSON.stringify({ok: true, parsedBody}), {
+			headers: {
+				'content-type': 'application/json',
+			},
+		});
+	};
+
+	const json = await ky.post('https://example.com/endpoint', {
+		json: fixture,
+		fetch: customFetch,
+	}).json();
+
+	t.deepEqual(json, {ok: true, parsedBody: fixture});
+});
+
+test('unknown options are passed to fetch', async t => {
+	t.plan(1);
+
+	const options = {next: {revalidate: 3600}};
+
+	const customFetch: typeof fetch = async (request, init) => {
+		t.is(init.next, options.next);
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {...options, fetch: customFetch}).text();
+});
+
+test('unknown options with falsy values are passed to fetch', async t => {
+	t.plan(3);
+
+	const customFetch: typeof fetch = async (request, init) => {
+		t.is(init.customNull, null);
+		t.is(init.customFalse, false);
+		t.is(init.customZero, 0);
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {
+		customNull: null, customFalse: false, customZero: 0, fetch: customFetch,
+	}).text();
+});
+
+test('ky-specific options are not passed to fetch', async t => {
+	const customFetch: typeof fetch = async (request, init) => {
+		t.is(init.retry, undefined);
+		t.is(init.timeout, undefined);
+		t.is(init.hooks, undefined);
+		t.is(init.throwHttpErrors, undefined);
+		t.is(init.json, undefined);
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {retry: 3, timeout: 5000, fetch: customFetch}).text();
+});
+
+test('fetch-only options like dispatcher are passed to fetch', async t => {
+	t.plan(1);
+
+	const mockDispatcher = {name: 'custom-agent'};
+
+	const customFetch: typeof fetch = async (request, init) => {
+		t.is(init.dispatcher, mockDispatcher);
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {dispatcher: mockDispatcher, fetch: customFetch}).text();
+});
+
+test.serial('fetch-only options like dispatcher are passed to fetch even when Request is patched', async t => {
+	t.plan(1);
+
+	const mockDispatcher = {name: 'custom-agent'};
+	const originalDescriptor = Object.getOwnPropertyDescriptor(Request.prototype, 'dispatcher');
+
+	try {
+		Object.defineProperty(Request.prototype, 'dispatcher', {
+			value: undefined,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+
+		const customFetch: typeof fetch = async (request, init) => {
+			t.is(init.dispatcher, mockDispatcher);
+			return new Response(request.url);
+		};
+
+		await ky(fixture, {dispatcher: mockDispatcher, fetch: customFetch}).text();
+	} finally {
+		if (originalDescriptor) {
+			Object.defineProperty(Request.prototype, 'dispatcher', originalDescriptor);
+		} else {
+			delete (Request.prototype as any).dispatcher;
+		}
+	}
+});
+
+test('priority option is passed to fetch', async t => {
+	t.plan(1);
+
+	const customFetch: typeof fetch = async (request, init) => {
+		t.is(init.priority, 'high');
+		return new Response(request.url);
+	};
+
+	await ky(fixture, {priority: 'high', fetch: customFetch}).text();
+});
+
+test.serial('vendor-specific options like `next` are passed to fetch even when Request is patched', async t => {
+	t.plan(1);
+
+	const options = {next: {revalidate: 3600, tags: ['test']}};
+
+	// Simulate Next.js edge runtime behavior by patching Request.prototype
+	const originalDescriptor = Object.getOwnPropertyDescriptor(Request.prototype, 'next');
+
+	try {
+		// Patch Request.prototype to have a 'next' property (like Next.js does in edge runtime)
+		Object.defineProperty(Request.prototype, 'next', {
+			value: undefined,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+
+		const customFetch: typeof fetch = async (request, init) => {
+			// Verify that the `next` option is still passed to fetch despite being on Request.prototype
+			t.deepEqual(init.next, options.next);
+			return new Response(request.url);
+		};
+
+		await ky(fixture, {...options, fetch: customFetch}).text();
+	} finally {
+		// Restore original state
+		if (originalDescriptor) {
+			Object.defineProperty(Request.prototype, 'next', originalDescriptor);
+		} else {
+			delete (Request.prototype as any).next;
+		}
+	}
+});
